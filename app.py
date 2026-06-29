@@ -1,0 +1,409 @@
+"""
+GRC Gap Analyzer
+================
+AI-powered compliance gap analysis tool.
+Paste or upload a policy document, select a framework,
+and get a structured gap report with risk ratings and remediation guidance.
+
+Frameworks supported: ISO 27001:2022 · NIST CSF 2.0 · NIS2 · DORA
+AI backend: OpenAI GPT-4o
+"""
+
+import os
+import io
+import json
+import textwrap
+
+import streamlit as st
+import openai
+import pandas as pd
+
+try:
+    from pypdf import PdfReader
+    PDF_SUPPORT = True
+except ImportError:
+    PDF_SUPPORT = False
+
+# ── Page config ───────────────────────────────────────────────────────────────
+
+st.set_page_config(
+    page_title="GRC Gap Analyzer",
+    page_icon="🔒",
+    layout="wide",
+)
+
+# ── Framework definitions ─────────────────────────────────────────────────────
+
+FRAMEWORKS = {
+    "ISO 27001:2022": [
+        "5 – Organizational controls",
+        "6 – People controls",
+        "7 – Physical controls",
+        "8.1 – User endpoint devices",
+        "8.2 – Privileged access rights",
+        "8.3 – Information access restriction",
+        "8.4 – Access to source code",
+        "8.5 – Secure authentication",
+        "8.6 – Capacity management",
+        "8.7 – Protection against malware",
+        "8.8 – Management of technical vulnerabilities",
+        "8.9 – Configuration management",
+        "8.10 – Information deletion",
+        "8.11 – Data masking",
+        "8.12 – Data leakage prevention",
+        "8.13 – Information backup",
+        "8.14 – Redundancy of information processing facilities",
+        "8.15 – Logging",
+        "8.16 – Monitoring activities",
+        "8.17 – Clock synchronisation",
+        "8.18 – Use of privileged utility programs",
+        "8.19 – Installation of software on operational systems",
+        "8.20 – Networks security",
+        "8.21 – Security of network services",
+        "8.22 – Segregation of networks",
+        "8.23 – Web filtering",
+        "8.24 – Use of cryptography",
+        "8.25 – Secure development life cycle",
+        "8.26 – Application security requirements",
+        "8.27 – Secure system architecture and engineering principles",
+        "8.28 – Secure coding",
+        "8.29 – Security testing in development and acceptance",
+        "8.30 – Outsourced development",
+        "8.31 – Separation of development, test and production",
+        "8.32 – Change management",
+        "8.33 – Test information",
+        "8.34 – Protection of information systems during audit testing",
+    ],
+    "NIST CSF 2.0": [
+        "GV.OC – Organizational Context",
+        "GV.RM – Risk Management Strategy",
+        "GV.RR – Roles, Responsibilities, and Authorities",
+        "GV.PO – Policy",
+        "GV.OV – Oversight",
+        "GV.SC – Cybersecurity Supply Chain Risk Management",
+        "ID.AM – Asset Management",
+        "ID.RA – Risk Assessment",
+        "ID.IM – Improvement",
+        "PR.AA – Identity Management, Authentication, and Access Control",
+        "PR.AT – Awareness and Training",
+        "PR.DS – Data Security",
+        "PR.PS – Platform Security",
+        "PR.IR – Technology Infrastructure Resilience",
+        "DE.CM – Continuous Monitoring",
+        "DE.AE – Adverse Event Analysis",
+        "RS.MA – Incident Management",
+        "RS.AN – Incident Analysis",
+        "RS.CO – Incident Response Reporting and Communication",
+        "RS.MI – Incident Mitigation",
+        "RC.RP – Incident Recovery Plan Execution",
+        "RC.CO – Incident Recovery Communication",
+    ],
+    "NIS2 (Directive 2022/2555)": [
+        "Art 21.2a – Policies on risk analysis and information system security",
+        "Art 21.2b – Incident handling",
+        "Art 21.2c – Business continuity & crisis management",
+        "Art 21.2d – Supply chain security",
+        "Art 21.2e – Security in network and information systems acquisition",
+        "Art 21.2f – Policies and procedures to assess cybersecurity measures",
+        "Art 21.2g – Basic cyber hygiene practices and cybersecurity training",
+        "Art 21.2h – Policies and procedures on use of cryptography",
+        "Art 21.2i – Human resources security, access control and asset management",
+        "Art 21.2j – Use of multi-factor authentication",
+        "Art 23 – Incident reporting obligations",
+        "Art 24 – Use of certified ICT products and services",
+    ],
+    "DORA (Regulation EU 2022/2554)": [
+        "Art 5 – ICT risk management framework",
+        "Art 6 – ICT risk management systems, protocols and tools",
+        "Art 7 – ICT systems, protocols and tools",
+        "Art 8 – Identification of ICT risk",
+        "Art 9 – Protection and prevention",
+        "Art 10 – Detection of anomalous activities",
+        "Art 11 – Response and recovery",
+        "Art 12 – Backup policies and recovery procedures",
+        "Art 13 – Learning and evolving",
+        "Art 14 – Communication",
+        "Art 17 – ICT-related incident management process",
+        "Art 18 – Classification of ICT-related incidents",
+        "Art 19 – Reporting of major ICT-related incidents",
+        "Art 24 – General principles of digital operational resilience testing",
+        "Art 26 – Advanced testing of ICT tools (TLPT)",
+        "Art 28 – General principles on sound management of ICT third-party risk",
+        "Art 30 – Key contractual provisions for ICT third-party service providers",
+    ],
+}
+
+# ── PDF extraction ────────────────────────────────────────────────────────────
+
+def extract_pdf_text(uploaded_file) -> str:
+    """Extract plain text from an uploaded PDF file."""
+    reader = PdfReader(io.BytesIO(uploaded_file.read()))
+    pages = [page.extract_text() or "" for page in reader.pages]
+    text = "\n\n".join(pages).strip()
+    if not text:
+        st.warning("Could not extract text from this PDF — it may be scanned/image-based. Try pasting the text manually.")
+    return text
+
+# ── Prompt builder ────────────────────────────────────────────────────────────
+
+SYSTEM_PROMPT = textwrap.dedent("""
+    You are a senior GRC consultant specialising in information security compliance.
+    You will be given a policy or control document and asked to perform a gap analysis
+    against a specific framework.
+
+    For EACH control domain / article provided, assess the input document and return
+    a JSON array. Each element must have exactly these keys:
+
+    - "domain"          : string  — the control domain/article label
+    - "coverage"        : string  — one of: "Full", "Partial", "Missing"
+    - "evidence"        : string  — quote or paraphrase from the document that supports
+                                    coverage (or "None found" if missing)
+    - "gap"             : string  — specific gap description (empty string if full coverage)
+    - "risk_level"      : string  — one of: "High", "Medium", "Low", "N/A"
+    - "recommendation"  : string  — concise remediation action (1–2 sentences)
+
+    Return ONLY the JSON array. No markdown fences, no commentary.
+""").strip()
+
+
+def build_user_prompt(document: str, framework: str, domains: list[str]) -> str:
+    domain_list = "\n".join(f"- {d}" for d in domains)
+    return textwrap.dedent(f"""
+        Framework: {framework}
+
+        Control domains to assess:
+        {domain_list}
+
+        Document to analyse:
+        ---
+        {document}
+        ---
+
+        Return the gap analysis JSON array as instructed.
+    """).strip()
+
+
+# ── OpenAI call ───────────────────────────────────────────────────────────────
+
+def run_gap_analysis(api_key: str, document: str, framework: str) -> list[dict]:
+    client = openai.OpenAI(api_key=api_key)
+    domains = FRAMEWORKS[framework]
+    user_prompt = build_user_prompt(document, framework, domains)
+
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        temperature=0.1,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user",   "content": user_prompt},
+        ],
+    )
+
+    raw = response.choices[0].message.content.strip()
+    return json.loads(raw)
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+RISK_COLOURS = {"High": "🔴", "Medium": "🟠", "Low": "🟡", "N/A": "⚪"}
+COVERAGE_COLOURS = {"Full": "✅", "Partial": "🔶", "Missing": "❌"}
+
+
+def score_summary(results: list[dict]) -> dict:
+    total = len(results)
+    full    = sum(1 for r in results if r["coverage"] == "Full")
+    partial = sum(1 for r in results if r["coverage"] == "Partial")
+    missing = sum(1 for r in results if r["coverage"] == "Missing")
+    high    = sum(1 for r in results if r["risk_level"] == "High")
+    pct     = round((full + 0.5 * partial) / total * 100) if total else 0
+    return dict(total=total, full=full, partial=partial, missing=missing,
+                high_risk=high, score=pct)
+
+
+def results_to_df(results: list[dict]) -> pd.DataFrame:
+    rows = []
+    for r in results:
+        rows.append({
+            "Domain"        : r.get("domain", ""),
+            "Coverage"      : f"{COVERAGE_COLOURS.get(r.get('coverage',''), '')} {r.get('coverage','')}",
+            "Risk"          : f"{RISK_COLOURS.get(r.get('risk_level',''), '')} {r.get('risk_level','')}",
+            "Gap"           : r.get("gap", ""),
+            "Evidence"      : r.get("evidence", ""),
+            "Recommendation": r.get("recommendation", ""),
+        })
+    return pd.DataFrame(rows)
+
+
+# ── UI ────────────────────────────────────────────────────────────────────────
+
+st.title("🔒 GRC Gap Analyzer")
+st.caption(
+    "Paste a security policy or control document — get an AI-powered gap analysis "
+    "mapped to your chosen compliance framework."
+)
+
+# Sidebar — config
+with st.sidebar:
+    st.header("Configuration")
+    api_key = st.text_input(
+        "OpenAI API Key",
+        type="password",
+        placeholder="sk-...",
+        help="Your key is used only for this session and never stored.",
+    )
+    framework = st.selectbox("Target Framework", list(FRAMEWORKS.keys()))
+    st.markdown("---")
+    st.markdown(
+        "**Frameworks supported**\n"
+        "- ISO 27001:2022 (Annex A)\n"
+        "- NIST CSF 2.0\n"
+        "- NIS2 Directive (Art 21–24)\n"
+        "- DORA (Regulation EU 2022/2554)\n\n"
+        "**Model:** GPT-4o\n\n"
+        "[GitHub](https://github.com/workmcg/grc-gap-ai) · "
+        "[control-crosswalk](https://github.com/workmcg/control-crosswalk)"
+    )
+
+# Main — document input
+st.subheader("1 · Load your document")
+
+input_method = st.radio(
+    "Input method",
+    ["Paste text", "Upload PDF"],
+    horizontal=True,
+    disabled=not PDF_SUPPORT if True else False,
+    help="PDF upload requires `pypdf`. Install with: pip install pypdf" if not PDF_SUPPORT else None,
+)
+
+document = ""
+
+if input_method == "Upload PDF":
+    if not PDF_SUPPORT:
+        st.warning("PDF support requires `pypdf`. Run `pip install pypdf` then restart the app.")
+    else:
+        uploaded_file = st.file_uploader(
+            "Upload a policy or procedure document (PDF)",
+            type=["pdf"],
+            help="Text-based PDFs work best. Scanned/image PDFs may not extract correctly.",
+        )
+        if uploaded_file:
+            with st.spinner("Extracting text from PDF..."):
+                document = extract_pdf_text(uploaded_file)
+            if document:
+                st.success(f"Extracted {len(document):,} characters from {uploaded_file.name}")
+                with st.expander("Preview extracted text"):
+                    st.text(document[:2000] + ("..." if len(document) > 2000 else ""))
+else:
+    document = st.text_area(
+        label="Policy / procedure / control description",
+        height=280,
+        placeholder=(
+            "Paste the text of your information security policy, procedure, "
+            "or control description here...\n\n"
+            "Tip: even a partial draft works — the tool will flag what's missing."
+        ),
+    )
+
+# Sample document button
+if st.button("Load sample document", type="secondary"):
+    document = textwrap.dedent("""
+        Information Security Policy — Acme Ltd (v2.1)
+
+        1. Access Control
+        All systems require username and password authentication. Privileged accounts
+        are reviewed quarterly. Remote access uses VPN with MFA enforced.
+
+        2. Asset Management
+        IT assets are inventoried in a CMDB updated monthly. Each asset has a named owner.
+        Software licences are tracked centrally.
+
+        3. Incident Response
+        Security incidents must be reported to the SOC within 4 hours of detection.
+        A post-incident review is conducted for P1/P2 events. There is no formal playbook
+        for ransomware or data-exfiltration scenarios.
+
+        4. Backup and Recovery
+        Critical data is backed up daily to an off-site encrypted store.
+        Recovery tests are conducted annually. RTO target is 24 hours.
+
+        5. Vulnerability Management
+        Internal networks are scanned monthly with an authenticated scanner.
+        Critical patches must be applied within 14 days of release.
+        There is currently no process for third-party/supply-chain vulnerability tracking.
+    """).strip()
+    st.rerun()
+
+# Analyse button
+st.subheader("2 · Run analysis")
+run = st.button("Analyse", type="primary", disabled=not (api_key and document))
+
+if not api_key:
+    st.info("Add your OpenAI API key in the sidebar to enable analysis.")
+elif not document:
+    st.info("Paste a document above to get started.")
+
+# Results
+if run and api_key and document:
+    with st.spinner(f"Analysing against {framework} …"):
+        try:
+            results = run_gap_analysis(api_key, document, framework)
+        except json.JSONDecodeError:
+            st.error("The model returned an unexpected format. Try again or shorten your document.")
+            st.stop()
+        except openai.AuthenticationError:
+            st.error("Invalid API key. Please check your OpenAI key in the sidebar.")
+            st.stop()
+        except Exception as e:
+            st.error(f"Unexpected error: {e}")
+            st.stop()
+
+    st.subheader("3 · Results")
+
+    # Summary metrics
+    s = score_summary(results)
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Compliance Score", f"{s['score']}%")
+    c2.metric("✅ Full Coverage",  s["full"])
+    c3.metric("🔶 Partial",        s["partial"])
+    c4.metric("❌ Missing",        s["missing"])
+    c5.metric("🔴 High Risk Gaps", s["high_risk"])
+
+    st.markdown("---")
+
+    # Filter controls
+    col_a, col_b = st.columns(2)
+    filter_coverage = col_a.multiselect(
+        "Filter by coverage",
+        ["Full", "Partial", "Missing"],
+        default=["Partial", "Missing"],
+    )
+    filter_risk = col_b.multiselect(
+        "Filter by risk level",
+        ["High", "Medium", "Low", "N/A"],
+        default=["High", "Medium"],
+    )
+
+    filtered = [
+        r for r in results
+        if r.get("coverage") in filter_coverage
+        or r.get("risk_level") in filter_risk
+    ]
+
+    if not filtered:
+        st.success("No gaps match the current filters — try adjusting the filter above.")
+    else:
+        df = results_to_df(filtered)
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
+        # CSV export
+        csv = results_to_df(results).to_csv(index=False)
+        st.download_button(
+            label="⬇ Export full report as CSV",
+            data=csv,
+            file_name=f"gap_analysis_{framework.split()[0].lower()}.csv",
+            mime="text/csv",
+        )
+
+    # Raw JSON expander
+    with st.expander("Raw JSON output"):
+        st.json(results)
