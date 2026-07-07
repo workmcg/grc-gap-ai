@@ -1,6 +1,6 @@
 # 🔒 GRC Gap Analyzer
 
-AI-powered compliance gap analysis — paste a security policy or control document and get a structured gap report mapped to ISO 27001, NIST CSF 2.0, or NIS2 in seconds.
+AI-powered compliance gap analysis — paste a security policy or control document and get a structured gap report mapped to ISO 27001, NIST CSF 2.0, NIS2, or DORA in seconds.
 
 Built as a natural extension of [control-crosswalk](https://github.com/workmcg/control-crosswalk): where that tool maps controls statically across frameworks, this one uses LLM reasoning to assess *how well* a real document covers them.
 
@@ -8,8 +8,8 @@ Built as a natural extension of [control-crosswalk](https://github.com/workmcg/c
 
 ## What it does
 
-1. You paste a policy, procedure, or control description
-2. Select a target framework (ISO 27001:2022 · NIST CSF 2.0 · NIS2)
+1. Paste a policy/procedure, or upload a PDF directly
+2. Select a target framework (ISO 27001:2022 · NIST CSF 2.0 · NIS2 · DORA)
 3. GPT-4o reads the document against every control domain and returns:
    - **Coverage** — Full / Partial / Missing
    - **Evidence** — the specific text that provides (or fails to provide) coverage
@@ -36,7 +36,7 @@ Open `http://localhost:8501`, add your OpenAI API key in the sidebar, and run th
 
 ## Live demo
 
-Deployed on Streamlit Community Cloud → **[grc-gap-ai.streamlit.app](https://grc-gap-ai.streamlit.app)** *(add after deployment)*
+🚧 Not yet deployed — currently local-only. Streamlit Community Cloud deployment is next on the roadmap.
 
 ---
 
@@ -47,6 +47,7 @@ Deployed on Streamlit Community Cloud → **[grc-gap-ai.streamlit.app](https://g
 | ISO/IEC 27001 | 2022 (Annex A) | 36 control domains |
 | NIST CSF | 2.0 | 22 subcategories |
 | NIS2 Directive | 2022/2555 | 12 articles (Art 21–24) |
+| DORA | Regulation (EU) 2022/2554 | 17 articles |
 
 ---
 
@@ -54,22 +55,22 @@ Deployed on Streamlit Community Cloud → **[grc-gap-ai.streamlit.app](https://g
 
 ```
 ┌─────────────────────┐
-│   Streamlit UI      │  ← text input, framework picker, filter, CSV export
+│   Streamlit UI       │  ← text input, framework picker, filter, CSV export
 └────────┬────────────┘
          │ document + framework domains
          ▼
 ┌─────────────────────┐
-│  Prompt builder     │  ← structured system prompt + per-domain instructions
+│   Prompt builder     │  ← structured system prompt + per-domain instructions
 └────────┬────────────┘
          │
          ▼
 ┌─────────────────────┐
-│   OpenAI GPT-4o     │  ← temperature 0.1 for consistent, auditable output
+│   OpenAI GPT-4o       │  ← temperature 0.1 for consistent, auditable output
 └────────┬────────────┘
          │ JSON array
          ▼
 ┌─────────────────────┐
-│  pandas DataFrame   │  ← scored, filtered, colour-coded, exportable
+│   pandas DataFrame    │  ← scored, filtered, colour-coded, exportable
 └─────────────────────┘
 ```
 
@@ -87,9 +88,13 @@ Deployed on Streamlit Community Cloud → **[grc-gap-ai.streamlit.app](https://g
 
 ## Roadmap
 
-- [ ] PDF upload support (via `pypdf`)
+**Shipped**
+- [x] PDF upload support (via `pypdf`)
+- [x] DORA (Digital Operational Resilience Act) framework
+
+**Up next**
+- [ ] Live deployment on Streamlit Community Cloud
 - [ ] Multi-document comparison (e.g. compare v1 vs v2 of a policy)
-- [ ] DORA (Digital Operational Resilience Act) framework
 - [ ] PCI-DSS v4.0 framework
 - [ ] Local model support (Ollama / llama.cpp) for air-gapped environments
 
