@@ -140,6 +140,60 @@ def test_diff_to_df_has_expected_columns():
     assert "v2 Coverage" in df.columns
 
 
+def test_four_providers_defined():
+    assert set(app.PROVIDERS.keys()) == {
+        "OpenAI",
+        "Groq (free tier)",
+        "Google Gemini (free tier)",
+        "Ollama (local, free)",
+    }
+
+
+def test_openai_provider_uses_default_base_url():
+    # None tells the OpenAI SDK to use its own default endpoint.
+    assert app.PROVIDERS["OpenAI"]["base_url"] is None
+    assert app.PROVIDERS["OpenAI"]["needs_key"] is True
+
+
+def test_ollama_provider_needs_no_key():
+    ollama = app.PROVIDERS["Ollama (local, free)"]
+    assert ollama["needs_key"] is False
+    assert ollama["base_url"] == "http://localhost:11434/v1"
+
+
+def test_free_tier_providers_are_flagged_correctly():
+    assert app.PROVIDERS["OpenAI"]["free_tier"] is False
+    for name in ("Groq (free tier)", "Google Gemini (free tier)", "Ollama (local, free)"):
+        assert app.PROVIDERS[name]["free_tier"] is True
+
+
+def test_every_provider_has_a_default_model():
+    for name, cfg in app.PROVIDERS.items():
+        assert cfg["default_model"], f"{name} has no default_model"
+
+
+def test_run_gap_analysis_strips_markdown_code_fences():
+    fenced_json = '```json\n[{"domain": "A", "coverage": "Full"}]\n```'
+    msg = MagicMock()
+    msg.content = fenced_json
+    choice = MagicMock()
+    choice.message = msg
+    resp = MagicMock()
+    resp.choices = [choice]
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = resp
+
+    with patch.object(openai, "OpenAI", return_value=mock_client):
+        result = app.run_gap_analysis(
+            api_key="sk-test-fake-key",
+            document="some doc",
+            framework="ISO 27001:2022",
+            base_url=None,
+            model="gpt-4o",
+        )
+    assert result == [{"domain": "A", "coverage": "Full"}]
+
+
 # ── UI smoke tests (mocked OpenAI, no real API calls / key needed) ────────────
 
 def _mock_openai_client(coverage_by_call):
@@ -191,8 +245,31 @@ def test_app_renders_without_exception():
 def test_framework_selectbox_offers_all_five():
     at = AppTest.from_file(str(Path(__file__).resolve().parent.parent / "app.py"))
     at.run(timeout=30)
-    assert "PCI DSS v4.0.1" in at.selectbox[0].options
-    assert len(at.selectbox[0].options) == 5
+    assert "PCI DSS v4.0.1" in at.selectbox[1].options
+    assert len(at.selectbox[1].options) == 5
+
+
+def test_provider_selectbox_offers_all_four():
+    at = AppTest.from_file(str(Path(__file__).resolve().parent.parent / "app.py"))
+    at.run(timeout=30)
+    assert set(at.selectbox[0].options) == {
+        "OpenAI",
+        "Groq (free tier)",
+        "Google Gemini (free tier)",
+        "Ollama (local, free)",
+    }
+
+
+def test_ollama_provider_shows_no_key_input():
+    at = AppTest.from_file(str(Path(__file__).resolve().parent.parent / "app.py"))
+    at.run(timeout=30)
+    # Baseline: OpenAI is selected by default, so an API key text_input exists.
+    assert len(at.text_input) >= 1
+    at.selectbox[0].set_value("Ollama (local, free)").run(timeout=30)
+    assert not at.exception
+    # No API key field should be rendered for Ollama -- only the Model field remains.
+    assert len(at.text_input) == 1
+    assert at.text_input[0].label == "Model"
 
 
 def test_single_doc_sample_button_populates_textarea():
@@ -220,7 +297,7 @@ def test_single_document_analysis_end_to_end_with_mocked_openai():
         at = AppTest.from_file(str(Path(__file__).resolve().parent.parent / "app.py"))
         at.run(timeout=30)
         at.text_input[0].set_value("sk-test-fake-key").run(timeout=30)
-        at.selectbox[0].set_value("PCI DSS v4.0.1").run(timeout=30)
+        at.selectbox[1].set_value("PCI DSS v4.0.1").run(timeout=30)
         at.button(key="single_sample").click().run(timeout=30)
         at.button(key="single_run").click().run(timeout=30)
 
@@ -236,7 +313,7 @@ def test_compare_versions_end_to_end_with_mocked_openai_detects_regression():
         at = AppTest.from_file(str(Path(__file__).resolve().parent.parent / "app.py"))
         at.run(timeout=30)
         at.text_input[0].set_value("sk-test-fake-key").run(timeout=30)
-        at.selectbox[0].set_value("ISO 27001:2022").run(timeout=30)
+        at.selectbox[1].set_value("ISO 27001:2022").run(timeout=30)
         at.button(key="compare_sample").click().run(timeout=30)
         at.button(key="compare_run").click().run(timeout=60)
 
