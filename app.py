@@ -4,8 +4,9 @@ GRC Gap Analyzer
 AI-powered compliance gap analysis tool.
 Paste or upload a policy document, select a framework,
 and get a structured gap report with risk ratings and remediation guidance.
+Also supports comparing two versions of a document to track compliance drift.
 
-Frameworks supported: ISO 27001:2022 · NIST CSF 2.0 · NIS2 · DORA
+Frameworks supported: ISO 27001:2022 · NIST CSF 2.0 · NIS2 · DORA · PCI DSS v4.0.1
 AI backend: OpenAI GPT-4o
 """
 
@@ -131,6 +132,20 @@ FRAMEWORKS = {
         "Art 28 – General principles on sound management of ICT third-party risk",
         "Art 30 – Key contractual provisions for ICT third-party service providers",
     ],
+    "PCI DSS v4.0.1": [
+        "Req 1 – Install and maintain network security controls",
+        "Req 2 – Apply secure configurations to all system components",
+        "Req 3 – Protect stored account data",
+        "Req 4 – Protect cardholder data with strong cryptography during transmission over open, public networks",
+        "Req 5 – Protect all systems and networks from malicious software",
+        "Req 6 – Develop and maintain secure systems and software",
+        "Req 7 – Restrict access to system components and cardholder data by business need to know",
+        "Req 8 – Identify users and authenticate access to system components",
+        "Req 9 – Restrict physical access to cardholder data",
+        "Req 10 – Log and monitor all access to system components and cardholder data",
+        "Req 11 – Test security of systems and networks regularly",
+        "Req 12 – Support information security with organizational policies and programs",
+    ],
 }
 
 # ── PDF extraction ────────────────────────────────────────────────────────────
@@ -207,6 +222,8 @@ def run_gap_analysis(api_key: str, document: str, framework: str) -> list[dict]:
 
 RISK_COLOURS = {"High": "🔴", "Medium": "🟠", "Low": "🟡", "N/A": "⚪"}
 COVERAGE_COLOURS = {"Full": "✅", "Partial": "🔶", "Missing": "❌"}
+COVERAGE_RANK = {"Missing": 0, "Partial": 1, "Full": 2}
+TREND_ICONS = {"Improved": "⬆️ Improved", "Regressed": "⬇️ Regressed", "Unchanged": "➡️ Unchanged"}
 
 
 def score_summary(results: list[dict]) -> dict:
@@ -234,176 +251,388 @@ def results_to_df(results: list[dict]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def diff_results(results_v1: list[dict], results_v2: list[dict]) -> list[dict]:
+    """Compare two gap-analysis result sets (same framework, same domains) and
+    classify each domain as Improved / Regressed / Unchanged based on coverage."""
+    by_domain_v2 = {r.get("domain"): r for r in results_v2}
+    rows = []
+    for r1 in results_v1:
+        domain = r1.get("domain")
+        r2 = by_domain_v2.get(domain)
+        if r2 is None:
+            continue
+        rank1 = COVERAGE_RANK.get(r1.get("coverage"), 0)
+        rank2 = COVERAGE_RANK.get(r2.get("coverage"), 0)
+        if rank2 > rank1:
+            trend = "Improved"
+        elif rank2 < rank1:
+            trend = "Regressed"
+        else:
+            trend = "Unchanged"
+        rows.append({
+            "domain": domain,
+            "coverage_v1": r1.get("coverage", ""),
+            "coverage_v2": r2.get("coverage", ""),
+            "risk_v1": r1.get("risk_level", ""),
+            "risk_v2": r2.get("risk_level", ""),
+            "gap_v2": r2.get("gap", ""),
+            "recommendation_v2": r2.get("recommendation", ""),
+            "trend": trend,
+        })
+    return rows
+
+
+def diff_summary(diff_rows: list[dict]) -> dict:
+    improved  = sum(1 for r in diff_rows if r["trend"] == "Improved")
+    regressed = sum(1 for r in diff_rows if r["trend"] == "Regressed")
+    unchanged = sum(1 for r in diff_rows if r["trend"] == "Unchanged")
+    return dict(improved=improved, regressed=regressed, unchanged=unchanged, total=len(diff_rows))
+
+
+def diff_to_df(diff_rows: list[dict]) -> pd.DataFrame:
+    rows = []
+    for r in diff_rows:
+        rows.append({
+            "Domain"          : r["domain"],
+            "Trend"           : TREND_ICONS.get(r["trend"], r["trend"]),
+            "v1 Coverage"     : f"{COVERAGE_COLOURS.get(r['coverage_v1'], '')} {r['coverage_v1']}",
+            "v2 Coverage"     : f"{COVERAGE_COLOURS.get(r['coverage_v2'], '')} {r['coverage_v2']}",
+            "v2 Risk"         : f"{RISK_COLOURS.get(r['risk_v2'], '')} {r['risk_v2']}",
+            "Remaining Gap (v2)": r["gap_v2"],
+            "Recommendation (v2)": r["recommendation_v2"],
+        })
+    return pd.DataFrame(rows)
+
+
+SAMPLE_DOCUMENT = textwrap.dedent("""
+    Information Security Policy — Acme Ltd (v2.1)
+
+    1. Access Control
+    All systems require username and password authentication. Privileged accounts
+    are reviewed quarterly. Remote access uses VPN with MFA enforced.
+
+    2. Asset Management
+    IT assets are inventoried in a CMDB updated monthly. Each asset has a named owner.
+    Software licences are tracked centrally.
+
+    3. Incident Response
+    Security incidents must be reported to the SOC within 4 hours of detection.
+    A post-incident review is conducted for P1/P2 events. There is no formal playbook
+    for ransomware or data-exfiltration scenarios.
+
+    4. Backup and Recovery
+    Critical data is backed up daily to an off-site encrypted store.
+    Recovery tests are conducted annually. RTO target is 24 hours.
+
+    5. Vulnerability Management
+    Internal networks are scanned monthly with an authenticated scanner.
+    Critical patches must be applied within 14 days of release.
+    There is currently no process for third-party/supply-chain vulnerability tracking.
+""").strip()
+
+SAMPLE_DOCUMENT_V2 = textwrap.dedent("""
+    Information Security Policy — Acme Ltd (v3.0)
+
+    1. Access Control
+    All systems require username and password authentication, with MFA now enforced
+    for all administrative access in addition to remote access. Privileged accounts
+    are reviewed monthly.
+
+    2. Asset Management
+    IT assets are inventoried in a CMDB updated monthly. Each asset has a named owner.
+    Software licences are tracked centrally. Third-party/supply-chain software components
+    are now inventoried as part of the same CMDB process.
+
+    3. Incident Response
+    Security incidents must be reported to the SOC within 4 hours of detection.
+    A post-incident review is conducted for P1/P2 events. A formal ransomware and
+    data-exfiltration playbook was published this quarter, including containment
+    steps and regulator notification timelines.
+
+    4. Backup and Recovery
+    Critical data is backed up weekly (reduced from daily due to storage cost
+    optimisation) to an off-site encrypted store. Recovery tests are conducted
+    annually. RTO target is 24 hours.
+
+    5. Vulnerability Management
+    Internal networks are scanned monthly with an authenticated scanner.
+    Critical patches must be applied within 14 days of release. A quarterly
+    third-party/supply-chain vulnerability review has been introduced, covering
+    all vendors with system access.
+""").strip()
+
+
+def render_document_input(key_prefix: str, heading: str) -> str:
+    """Renders the paste-text / upload-PDF input widget set for one document
+    slot, using key_prefix to keep Streamlit widget state isolated when this
+    is rendered more than once on the same page (e.g. v1 and v2 in compare mode)."""
+    st.markdown(f"**{heading}**")
+
+    input_method = st.radio(
+        "Input method",
+        ["Paste text", "Upload PDF"],
+        horizontal=True,
+        key=f"{key_prefix}_input_method",
+        disabled=not PDF_SUPPORT,
+        help="PDF upload requires `pypdf`. Install with: pip install pypdf" if not PDF_SUPPORT else None,
+        label_visibility="collapsed",
+    )
+
+    document = ""
+
+    if input_method == "Upload PDF":
+        if not PDF_SUPPORT:
+            st.warning("PDF support requires `pypdf`. Run `pip install pypdf` then restart the app.")
+        else:
+            uploaded_file = st.file_uploader(
+                "Upload a policy or procedure document (PDF)",
+                type=["pdf"],
+                key=f"{key_prefix}_uploader",
+                help="Text-based PDFs work best. Scanned/image PDFs may not extract correctly.",
+            )
+            if uploaded_file:
+                with st.spinner("Extracting text from PDF..."):
+                    document = extract_pdf_text(uploaded_file)
+                if document:
+                    st.success(f"Extracted {len(document):,} characters from {uploaded_file.name}")
+                    with st.expander("Preview extracted text"):
+                        st.text(document[:2000] + ("..." if len(document) > 2000 else ""))
+    else:
+        document = st.text_area(
+            label="Policy / procedure / control description",
+            height=240,
+            key=f"{key_prefix}_textarea",
+            placeholder=(
+                "Paste the text of your information security policy, procedure, "
+                "or control description here...\n\n"
+                "Tip: even a partial draft works — the tool will flag what's missing."
+            ),
+            label_visibility="collapsed",
+        )
+
+    return document
+
+
 # ── UI ────────────────────────────────────────────────────────────────────────
 
-st.title("🔒 GRC Gap Analyzer")
-st.caption(
-    "Paste a security policy or control document — get an AI-powered gap analysis "
-    "mapped to your chosen compliance framework."
-)
+def main() -> None:
+    """Render the Streamlit app. Guarded by __main__ so this module can be
+    imported for testing (e.g. pytest importing FRAMEWORKS, score_summary,
+    diff_results) without executing any Streamlit UI calls."""
 
-# Sidebar — config
-with st.sidebar:
-    st.header("Configuration")
-    api_key = st.text_input(
-        "OpenAI API Key",
-        type="password",
-        placeholder="sk-...",
-        help="Your key is used only for this session and never stored.",
-    )
-    framework = st.selectbox("Target Framework", list(FRAMEWORKS.keys()))
-    st.markdown("---")
-    st.markdown(
-        "**Frameworks supported**\n"
-        "- ISO 27001:2022 (Annex A)\n"
-        "- NIST CSF 2.0\n"
-        "- NIS2 Directive (Art 21–24)\n"
-        "- DORA (Regulation EU 2022/2554)\n\n"
-        "**Model:** GPT-4o\n\n"
-        "[GitHub](https://github.com/workmcg/grc-gap-ai) · "
-        "[control-crosswalk](https://github.com/workmcg/control-crosswalk)"
+    st.title("🔒 GRC Gap Analyzer")
+    st.caption(
+        "Paste a security policy or control document — get an AI-powered gap analysis "
+        "mapped to your chosen compliance framework."
     )
 
-# Main — document input
-st.subheader("1 · Load your document")
-
-input_method = st.radio(
-    "Input method",
-    ["Paste text", "Upload PDF"],
-    horizontal=True,
-    disabled=not PDF_SUPPORT if True else False,
-    help="PDF upload requires `pypdf`. Install with: pip install pypdf" if not PDF_SUPPORT else None,
-)
-
-document = ""
-
-if input_method == "Upload PDF":
-    if not PDF_SUPPORT:
-        st.warning("PDF support requires `pypdf`. Run `pip install pypdf` then restart the app.")
-    else:
-        uploaded_file = st.file_uploader(
-            "Upload a policy or procedure document (PDF)",
-            type=["pdf"],
-            help="Text-based PDFs work best. Scanned/image PDFs may not extract correctly.",
+    # Sidebar — config
+    with st.sidebar:
+        st.header("Configuration")
+        api_key = st.text_input(
+            "OpenAI API Key",
+            type="password",
+            placeholder="sk-...",
+            help="Your key is used only for this session and never stored.",
         )
-        if uploaded_file:
-            with st.spinner("Extracting text from PDF..."):
-                document = extract_pdf_text(uploaded_file)
-            if document:
-                st.success(f"Extracted {len(document):,} characters from {uploaded_file.name}")
-                with st.expander("Preview extracted text"):
-                    st.text(document[:2000] + ("..." if len(document) > 2000 else ""))
-else:
-    document = st.text_area(
-        label="Policy / procedure / control description",
-        height=280,
-        placeholder=(
-            "Paste the text of your information security policy, procedure, "
-            "or control description here...\n\n"
-            "Tip: even a partial draft works — the tool will flag what's missing."
-        ),
-    )
-
-# Sample document button
-if st.button("Load sample document", type="secondary"):
-    document = textwrap.dedent("""
-        Information Security Policy — Acme Ltd (v2.1)
-
-        1. Access Control
-        All systems require username and password authentication. Privileged accounts
-        are reviewed quarterly. Remote access uses VPN with MFA enforced.
-
-        2. Asset Management
-        IT assets are inventoried in a CMDB updated monthly. Each asset has a named owner.
-        Software licences are tracked centrally.
-
-        3. Incident Response
-        Security incidents must be reported to the SOC within 4 hours of detection.
-        A post-incident review is conducted for P1/P2 events. There is no formal playbook
-        for ransomware or data-exfiltration scenarios.
-
-        4. Backup and Recovery
-        Critical data is backed up daily to an off-site encrypted store.
-        Recovery tests are conducted annually. RTO target is 24 hours.
-
-        5. Vulnerability Management
-        Internal networks are scanned monthly with an authenticated scanner.
-        Critical patches must be applied within 14 days of release.
-        There is currently no process for third-party/supply-chain vulnerability tracking.
-    """).strip()
-    st.rerun()
-
-# Analyse button
-st.subheader("2 · Run analysis")
-run = st.button("Analyse", type="primary", disabled=not (api_key and document))
-
-if not api_key:
-    st.info("Add your OpenAI API key in the sidebar to enable analysis.")
-elif not document:
-    st.info("Paste a document above to get started.")
-
-# Results
-if run and api_key and document:
-    with st.spinner(f"Analysing against {framework} …"):
-        try:
-            results = run_gap_analysis(api_key, document, framework)
-        except json.JSONDecodeError:
-            st.error("The model returned an unexpected format. Try again or shorten your document.")
-            st.stop()
-        except openai.AuthenticationError:
-            st.error("Invalid API key. Please check your OpenAI key in the sidebar.")
-            st.stop()
-        except Exception as e:
-            st.error(f"Unexpected error: {e}")
-            st.stop()
-
-    st.subheader("3 · Results")
-
-    # Summary metrics
-    s = score_summary(results)
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Compliance Score", f"{s['score']}%")
-    c2.metric("✅ Full Coverage",  s["full"])
-    c3.metric("🔶 Partial",        s["partial"])
-    c4.metric("❌ Missing",        s["missing"])
-    c5.metric("🔴 High Risk Gaps", s["high_risk"])
-
-    st.markdown("---")
-
-    # Filter controls
-    col_a, col_b = st.columns(2)
-    filter_coverage = col_a.multiselect(
-        "Filter by coverage",
-        ["Full", "Partial", "Missing"],
-        default=["Partial", "Missing"],
-    )
-    filter_risk = col_b.multiselect(
-        "Filter by risk level",
-        ["High", "Medium", "Low", "N/A"],
-        default=["High", "Medium"],
-    )
-
-    filtered = [
-        r for r in results
-        if r.get("coverage") in filter_coverage
-        or r.get("risk_level") in filter_risk
-    ]
-
-    if not filtered:
-        st.success("No gaps match the current filters — try adjusting the filter above.")
-    else:
-        df = results_to_df(filtered)
-        st.dataframe(df, use_container_width=True, hide_index=True)
-
-        # CSV export
-        csv = results_to_df(results).to_csv(index=False)
-        st.download_button(
-            label="⬇ Export full report as CSV",
-            data=csv,
-            file_name=f"gap_analysis_{framework.split()[0].lower()}.csv",
-            mime="text/csv",
+        framework = st.selectbox("Target Framework", list(FRAMEWORKS.keys()))
+        st.markdown("---")
+        st.markdown(
+            "**Frameworks supported**\n"
+            "- ISO 27001:2022 (Annex A)\n"
+            "- NIST CSF 2.0\n"
+            "- NIS2 Directive (Art 21–24)\n"
+            "- DORA (Regulation EU 2022/2554)\n"
+            "- PCI DSS v4.0.1 (12 requirements)\n\n"
+            "**Model:** GPT-4o\n\n"
+            "[GitHub](https://github.com/workmcg/grc-gap-ai) · "
+            "[control-crosswalk](https://github.com/workmcg/control-crosswalk)"
         )
 
-    # Raw JSON expander
-    with st.expander("Raw JSON output"):
-        st.json(results)
+    mode_tab, compare_tab = st.tabs(["📄 Single document", "🔁 Compare two versions"])
+
+    # ── Single document mode ───────────────────────────────────────────────────────
+    with mode_tab:
+        st.subheader("1 · Load your document")
+
+        document = render_document_input("single", "Document")
+
+        def _load_single_sample():
+            st.session_state["single_textarea"] = SAMPLE_DOCUMENT
+
+        st.button("Load sample document", type="secondary", key="single_sample", on_click=_load_single_sample)
+
+        st.subheader("2 · Run analysis")
+        run = st.button("Analyse", type="primary", disabled=not (api_key and document), key="single_run")
+
+        if not api_key:
+            st.info("Add your OpenAI API key in the sidebar to enable analysis.")
+        elif not document:
+            st.info("Paste a document above to get started.")
+
+        if run and api_key and document:
+            with st.spinner(f"Analysing against {framework} …"):
+                try:
+                    results = run_gap_analysis(api_key, document, framework)
+                except json.JSONDecodeError:
+                    st.error("The model returned an unexpected format. Try again or shorten your document.")
+                    st.stop()
+                except openai.AuthenticationError:
+                    st.error("Invalid API key. Please check your OpenAI key in the sidebar.")
+                    st.stop()
+                except Exception as e:
+                    st.error(f"Unexpected error: {e}")
+                    st.stop()
+
+            st.subheader("3 · Results")
+
+            s = score_summary(results)
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c1.metric("Compliance Score", f"{s['score']}%")
+            c2.metric("✅ Full Coverage",  s["full"])
+            c3.metric("🔶 Partial",        s["partial"])
+            c4.metric("❌ Missing",        s["missing"])
+            c5.metric("🔴 High Risk Gaps", s["high_risk"])
+
+            st.markdown("---")
+
+            col_a, col_b = st.columns(2)
+            filter_coverage = col_a.multiselect(
+                "Filter by coverage",
+                ["Full", "Partial", "Missing"],
+                default=["Partial", "Missing"],
+                key="single_filter_coverage",
+            )
+            filter_risk = col_b.multiselect(
+                "Filter by risk level",
+                ["High", "Medium", "Low", "N/A"],
+                default=["High", "Medium"],
+                key="single_filter_risk",
+            )
+
+            filtered = [
+                r for r in results
+                if r.get("coverage") in filter_coverage
+                or r.get("risk_level") in filter_risk
+            ]
+
+            if not filtered:
+                st.success("No gaps match the current filters — try adjusting the filter above.")
+            else:
+                df = results_to_df(filtered)
+                st.dataframe(df, width="stretch", hide_index=True)
+
+                csv = results_to_df(results).to_csv(index=False)
+                st.download_button(
+                    label="⬇ Export full report as CSV",
+                    data=csv,
+                    file_name=f"gap_analysis_{framework.split()[0].lower()}.csv",
+                    mime="text/csv",
+                    key="single_download",
+                )
+
+            with st.expander("Raw JSON output"):
+                st.json(results)
+
+    # ── Compare two versions mode ──────────────────────────────────────────────────
+    with compare_tab:
+        st.caption(
+            "Run the same framework assessment against two versions of a document — "
+            "e.g. last year's policy vs. this year's draft — and see which control "
+            "domains improved, regressed, or stayed the same."
+        )
+
+        st.subheader("1 · Load both versions")
+        col1, col2 = st.columns(2)
+        with col1:
+            document_v1 = render_document_input("v1", "Version 1 (baseline)")
+        with col2:
+            document_v2 = render_document_input("v2", "Version 2 (updated)")
+
+        def _load_compare_sample():
+            st.session_state["v1_textarea"] = SAMPLE_DOCUMENT
+            st.session_state["v2_textarea"] = SAMPLE_DOCUMENT_V2
+
+        st.button("Load sample v1 / v2 pair", type="secondary", key="compare_sample", on_click=_load_compare_sample)
+
+        st.subheader("2 · Run comparison")
+        compare_run = st.button(
+            "Compare versions",
+            type="primary",
+            disabled=not (api_key and document_v1 and document_v2),
+            key="compare_run",
+        )
+
+        if not api_key:
+            st.info("Add your OpenAI API key in the sidebar to enable analysis.")
+        elif not (document_v1 and document_v2):
+            st.info("Load both a v1 and v2 document above to compare them.")
+
+        if compare_run and api_key and document_v1 and document_v2:
+            with st.spinner(f"Analysing both versions against {framework} …"):
+                try:
+                    results_v1 = run_gap_analysis(api_key, document_v1, framework)
+                    results_v2 = run_gap_analysis(api_key, document_v2, framework)
+                except json.JSONDecodeError:
+                    st.error("The model returned an unexpected format. Try again or shorten your documents.")
+                    st.stop()
+                except openai.AuthenticationError:
+                    st.error("Invalid API key. Please check your OpenAI key in the sidebar.")
+                    st.stop()
+                except Exception as e:
+                    st.error(f"Unexpected error: {e}")
+                    st.stop()
+
+            st.subheader("3 · Comparison results")
+
+            diff_rows = diff_results(results_v1, results_v2)
+            d = diff_summary(diff_rows)
+
+            s1 = score_summary(results_v1)
+            s2 = score_summary(results_v2)
+
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c1.metric("v1 Score", f"{s1['score']}%")
+            c2.metric("v2 Score", f"{s2['score']}%", delta=f"{s2['score'] - s1['score']:+d} pts")
+            c3.metric("⬆️ Improved", d["improved"])
+            c4.metric("⬇️ Regressed", d["regressed"])
+            c5.metric("➡️ Unchanged", d["unchanged"])
+
+            st.markdown("---")
+
+            trend_filter = st.multiselect(
+                "Filter by trend",
+                ["Improved", "Regressed", "Unchanged"],
+                default=["Improved", "Regressed"],
+                key="compare_filter_trend",
+            )
+
+            filtered_diff = [r for r in diff_rows if r["trend"] in trend_filter]
+
+            if not filtered_diff:
+                st.success("No domains match the current filter — try adjusting it above.")
+            else:
+                diff_df = diff_to_df(filtered_diff)
+                st.dataframe(diff_df, width="stretch", hide_index=True)
+
+                csv = diff_to_df(diff_rows).to_csv(index=False)
+                st.download_button(
+                    label="⬇ Export comparison as CSV",
+                    data=csv,
+                    file_name=f"gap_comparison_{framework.split()[0].lower()}.csv",
+                    mime="text/csv",
+                    key="compare_download",
+                )
+
+            if d["regressed"] > 0:
+                st.warning(
+                    f"{d['regressed']} domain(s) regressed between versions — "
+                    "worth a closer look before treating v2 as an improvement overall."
+                )
+
+            with st.expander("Raw JSON output (v1 / v2)"):
+                st.json({"v1": results_v1, "v2": results_v2})
+
+
+if __name__ == "__main__":
+    main()

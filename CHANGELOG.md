@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.1.0] - 2026-07-08
+
+### Added
+- PCI DSS v4.0.1 as a 5th supported framework (12 principal requirements)
+- Compare two versions mode: run the same framework assessment against a v1/v2
+  document pair and get a per-domain Improved/Regressed/Unchanged diff
+- Test suite (`tests/test_app.py`, 19 tests) covering framework data, scoring/diff
+  logic, and full UI flows via `streamlit.testing.v1.AppTest` with OpenAI mocked
+
+### Fixed
+- "Load sample document" buttons now correctly populate the text area (previous
+  implementation set session state after the widget was already instantiated,
+  which silently failed to persist across the rerun)
+- Replaced deprecated `use_container_width` dataframe parameter with `width`
+
+### Changed
+- UI code now guarded by `if __name__ == "__main__":` so `app.py` can be
+  imported for testing without executing any Streamlit calls
+
 ## [1.0.0] - 2026-06-30
 
 ### Added
