@@ -7,7 +7,9 @@ and get a structured gap report with risk ratings and remediation guidance.
 Also supports comparing two versions of a document to track compliance drift.
 
 Frameworks supported: ISO 27001:2022 · NIST CSF 2.0 · NIS2 · DORA · PCI DSS v4.0.1
-AI backend: OpenAI GPT-4o
+Model providers: OpenAI · Groq (free tier) · Google Gemini (free tier) · Ollama (local, free)
+All four are used through the same OpenAI-compatible chat completions API --
+only the base_url, API key, and model name change per provider.
 """
 
 import os
@@ -148,6 +150,55 @@ FRAMEWORKS = {
     ],
 }
 
+# ── Model provider definitions ────────────────────────────────────────────────
+# All four providers expose an OpenAI-compatible chat completions API, so the
+# only things that change between them are base_url, whether an API key is
+# required, and the default model name. Ollama needs no key at all since it
+# runs entirely on the user's own machine.
+
+PROVIDERS = {
+    "OpenAI": {
+        "base_url": None,  # None = use the OpenAI SDK's default endpoint
+        "default_model": "gpt-4o",
+        "needs_key": True,
+        "key_placeholder": "sk-...",
+        "key_help": "Paid usage only -- platform.openai.com/settings/organization/billing. "
+                    "A ChatGPT Plus/Pro subscription does NOT include API credits.",
+        "signup_url": "https://platform.openai.com/api-keys",
+        "free_tier": False,
+    },
+    "Groq (free tier)": {
+        "base_url": "https://api.groq.com/openai/v1",
+        "default_model": "llama-3.3-70b-versatile",
+        "needs_key": True,
+        "key_placeholder": "gsk_...",
+        "key_help": "Free, no credit card required -- rate-limited (30 req/min, 14,400 req/day).",
+        "signup_url": "https://console.groq.com/keys",
+        "free_tier": True,
+    },
+    "Google Gemini (free tier)": {
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+        "default_model": "gemini-3-flash-preview",
+        "needs_key": True,
+        "key_placeholder": "AIza...",
+        "key_help": "Free tier with daily quota -- no credit card required for Flash models.",
+        "signup_url": "https://aistudio.google.com/apikey",
+        "free_tier": True,
+    },
+    "Ollama (local, free)": {
+        "base_url": "http://localhost:11434/v1",
+        "default_model": "llama3.1",
+        "needs_key": False,
+        "key_placeholder": "",
+        "key_help": "Runs entirely on your machine -- no API key, no account, no internet "
+                    "required. Install Ollama and run `ollama pull llama3.1` first. Only "
+                    "works when you run this app locally (`streamlit run app.py`), not on "
+                    "the hosted Streamlit Community Cloud deployment.",
+        "signup_url": None,
+        "free_tier": True,
+    },
+}
+
 # ── PDF extraction ────────────────────────────────────────────────────────────
 
 def extract_pdf_text(uploaded_file) -> str:
@@ -200,13 +251,19 @@ def build_user_prompt(document: str, framework: str, domains: list[str]) -> str:
 
 # ── OpenAI call ───────────────────────────────────────────────────────────────
 
-def run_gap_analysis(api_key: str, document: str, framework: str) -> list[dict]:
-    client = openai.OpenAI(api_key=api_key)
+def run_gap_analysis(
+    api_key: str,
+    document: str,
+    framework: str,
+    base_url: str | None = None,
+    model: str = "gpt-4o",
+) -> list[dict]:
+    client = openai.OpenAI(api_key=api_key, base_url=base_url)
     domains = FRAMEWORKS[framework]
     user_prompt = build_user_prompt(document, framework, domains)
 
     response = client.chat.completions.create(
-        model="gpt-4o",
+        model=model,
         temperature=0.1,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -215,6 +272,13 @@ def run_gap_analysis(api_key: str, document: str, framework: str) -> list[dict]:
     )
 
     raw = response.choices[0].message.content.strip()
+    # Some OpenAI-compatible providers wrap JSON in markdown code fences even
+    # when asked not to -- strip them defensively before parsing.
+    if raw.startswith("```"):
+        raw = raw.strip("`")
+        if raw.startswith("json"):
+            raw = raw[4:]
+        raw = raw.strip()
     return json.loads(raw)
 
 
@@ -429,12 +493,36 @@ def main() -> None:
     # Sidebar — config
     with st.sidebar:
         st.header("Configuration")
-        api_key = st.text_input(
-            "OpenAI API Key",
-            type="password",
-            placeholder="sk-...",
-            help="Your key is used only for this session and never stored.",
+
+        provider_name = st.selectbox(
+            "Model provider",
+            list(PROVIDERS.keys()),
+            help="OpenAI is paid-only. Groq, Gemini, and Ollama all have a free tier "
+                 "or are free outright -- pick one of those if you don't have OpenAI "
+                 "billing set up.",
         )
+        provider = PROVIDERS[provider_name]
+
+        if provider["needs_key"]:
+            api_key = st.text_input(
+                f"{provider_name.split(' (')[0]} API Key",
+                type="password",
+                placeholder=provider["key_placeholder"],
+                help=provider["key_help"],
+            )
+            if provider["signup_url"]:
+                st.caption(f"No key yet? [Get one free]({provider['signup_url']})"
+                           if provider["free_tier"] else f"[Get an API key]({provider['signup_url']})")
+        else:
+            api_key = "ollama-local"  # dummy value; Ollama's local server ignores it
+            st.caption(provider["key_help"])
+
+        model = st.text_input(
+            "Model",
+            value=provider["default_model"],
+            help="Override with any other model name this provider supports.",
+        )
+
         framework = st.selectbox("Target Framework", list(FRAMEWORKS.keys()))
         st.markdown("---")
         st.markdown(
@@ -444,7 +532,11 @@ def main() -> None:
             "- NIS2 Directive (Art 21–24)\n"
             "- DORA (Regulation EU 2022/2554)\n"
             "- PCI DSS v4.0.1 (12 requirements)\n\n"
-            "**Model:** GPT-4o\n\n"
+            "**Providers supported**\n"
+            "- OpenAI (paid)\n"
+            "- Groq (free tier)\n"
+            "- Google Gemini (free tier)\n"
+            "- Ollama (local, free)\n\n"
             "[GitHub](https://github.com/workmcg/grc-gap-ai) · "
             "[control-crosswalk](https://github.com/workmcg/control-crosswalk)"
         )
@@ -466,19 +558,33 @@ def main() -> None:
         run = st.button("Analyse", type="primary", disabled=not (api_key and document), key="single_run")
 
         if not api_key:
-            st.info("Add your OpenAI API key in the sidebar to enable analysis.")
+            st.info(f"Add your {provider_name.split(' (')[0]} API key in the sidebar to enable analysis.")
         elif not document:
             st.info("Paste a document above to get started.")
 
         if run and api_key and document:
-            with st.spinner(f"Analysing against {framework} …"):
+            with st.spinner(f"Analysing against {framework} via {provider_name} …"):
                 try:
-                    results = run_gap_analysis(api_key, document, framework)
+                    results = run_gap_analysis(
+                        api_key, document, framework,
+                        base_url=provider["base_url"], model=model,
+                    )
                 except json.JSONDecodeError:
-                    st.error("The model returned an unexpected format. Try again or shorten your document.")
+                    st.error("The model returned an unexpected format. Try again, shorten your document, or try a different model/provider.")
                     st.stop()
                 except openai.AuthenticationError:
-                    st.error("Invalid API key. Please check your OpenAI key in the sidebar.")
+                    st.error(f"Invalid API key for {provider_name}. Please check the key in the sidebar.")
+                    st.stop()
+                except openai.APIConnectionError:
+                    if provider_name.startswith("Ollama"):
+                        st.error(
+                            "Could not connect to Ollama. Make sure it's installed and running "
+                            "locally (`ollama serve`), and that the model is pulled "
+                            f"(`ollama pull {model}`). This only works when running the app "
+                            "locally, not on the hosted Streamlit Cloud deployment."
+                        )
+                    else:
+                        st.error(f"Could not connect to {provider_name}. Check your network connection and try again.")
                     st.stop()
                 except Exception as e:
                     st.error(f"Unexpected error: {e}")
@@ -564,20 +670,37 @@ def main() -> None:
         )
 
         if not api_key:
-            st.info("Add your OpenAI API key in the sidebar to enable analysis.")
+            st.info(f"Add your {provider_name.split(' (')[0]} API key in the sidebar to enable analysis.")
         elif not (document_v1 and document_v2):
             st.info("Load both a v1 and v2 document above to compare them.")
 
         if compare_run and api_key and document_v1 and document_v2:
-            with st.spinner(f"Analysing both versions against {framework} …"):
+            with st.spinner(f"Analysing both versions against {framework} via {provider_name} …"):
                 try:
-                    results_v1 = run_gap_analysis(api_key, document_v1, framework)
-                    results_v2 = run_gap_analysis(api_key, document_v2, framework)
+                    results_v1 = run_gap_analysis(
+                        api_key, document_v1, framework,
+                        base_url=provider["base_url"], model=model,
+                    )
+                    results_v2 = run_gap_analysis(
+                        api_key, document_v2, framework,
+                        base_url=provider["base_url"], model=model,
+                    )
                 except json.JSONDecodeError:
-                    st.error("The model returned an unexpected format. Try again or shorten your documents.")
+                    st.error("The model returned an unexpected format. Try again, shorten your documents, or try a different model/provider.")
                     st.stop()
                 except openai.AuthenticationError:
-                    st.error("Invalid API key. Please check your OpenAI key in the sidebar.")
+                    st.error(f"Invalid API key for {provider_name}. Please check the key in the sidebar.")
+                    st.stop()
+                except openai.APIConnectionError:
+                    if provider_name.startswith("Ollama"):
+                        st.error(
+                            "Could not connect to Ollama. Make sure it's installed and running "
+                            "locally (`ollama serve`), and that the model is pulled "
+                            f"(`ollama pull {model}`). This only works when running the app "
+                            "locally, not on the hosted Streamlit Cloud deployment."
+                        )
+                    else:
+                        st.error(f"Could not connect to {provider_name}. Check your network connection and try again.")
                     st.stop()
                 except Exception as e:
                     st.error(f"Unexpected error: {e}")

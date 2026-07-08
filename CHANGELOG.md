@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.2.0] - 2026-07-08
+
+### Added
+- Multi-provider support: Groq (free tier), Google Gemini (free tier), and
+  Ollama (fully local, free) alongside OpenAI, all via the same
+  OpenAI-compatible chat completions API -- just a provider config + base_url
+  swap. New "Model provider" dropdown and per-provider "Model" override field
+  in the sidebar.
+- Defensive markdown-code-fence stripping in `run_gap_analysis`, since some
+  OpenAI-compatible providers wrap JSON responses in ``` fences even when
+  asked not to.
+- Provider-aware error messages, including a specific message for Ollama
+  connection failures (server not running / model not pulled).
+- 8 new tests covering the PROVIDERS config and per-provider UI behavior.
+
 ## [1.1.0] - 2026-07-08
 
 ### Added
