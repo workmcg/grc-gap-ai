@@ -42,7 +42,7 @@ Open `http://localhost:8501`, add your OpenAI API key in the sidebar, and run th
 
 ## Live demo
 
-🚧 Deployment to Streamlit Community Cloud is in progress — this section will be updated with the live link once it's up. Until then, run it locally with the Quick start steps above.
+🔗 [grc-gap-analyzer.streamlit.app](https://grc-gap-analyzer.streamlit.app) — bring your own OpenAI API key, nothing is stored server-side.
 
 ---
 
@@ -106,9 +106,9 @@ Open `http://localhost:8501`, add your OpenAI API key in the sidebar, and run th
 - [x] DORA (Digital Operational Resilience Act) framework
 - [x] Multi-document comparison (compare v1 vs v2 of a policy)
 - [x] PCI DSS v4.0.1 framework
+- [x] Live deployment on Streamlit Community Cloud
 
 **Up next**
-- [ ] Live deployment on Streamlit Community Cloud
 - [ ] Local model support (Ollama / llama.cpp) for air-gapped environments
 - [ ] Save/load past assessments without re-running the model
 
